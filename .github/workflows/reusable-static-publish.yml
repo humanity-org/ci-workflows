@@ -1,0 +1,62 @@
+# Reusable: publish a pre-built static site to S3 + invalidate CloudFront.
+# The caller job builds the site (env vars are baked at build time — see
+# docs/frontend-build-matrix.md), uploads the output as an artifact, then:
+#
+#   publish:
+#     needs: build
+#     uses: humanity-org/devops/.github/workflows/reusable-static-publish.yml@main
+#     with:
+#       artifact-name: site
+#       bucket-name: humanity-safe-staging-ui
+#       distribution-id: E123ABC
+#     permissions:
+#       id-token: write
+
+name: reusable-static-publish
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: "Name of the uploaded build artifact"
+        required: true
+        type: string
+      bucket-name:
+        description: "Target S3 bucket (terraform output of the safe/swap stack)"
+        required: true
+        type: string
+      distribution-id:
+        description: "CloudFront distribution ID to invalidate"
+        required: true
+        type: string
+      aws-region:
+        description: "AWS region"
+        required: false
+        type: string
+        default: "us-east-1"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: site
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Org-level variable, provisioned by terraform/cicd (static_publish_role_arn output).
+          role-to-assume: ${{ github.ref_name == 'production' && vars.STATIC_PUBLISH_ROLE_ARN_PRODUCTION || vars.STATIC_PUBLISH_ROLE_ARN_STAGING }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Sync to S3
+        run: aws s3 sync site "s3://${{ inputs.bucket-name }}" --delete
+
+      - name: Invalidate CloudFront
+        run: aws cloudfront create-invalidation --distribution-id "${{ inputs.distribution-id }}" --paths '/*'

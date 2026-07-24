@@ -1,0 +1,106 @@
+# Reusable: build a Docker image and push it to ECR.
+# Called from the app repos (branch-per-env: staging/production) as:
+#
+#   jobs:
+#     build:
+#       uses: humanity-org/devops/.github/workflows/reusable-image-build.yml@main
+#       with:
+#         image-name: humanity-transaction-service
+#       permissions:
+#         id-token: write
+#         contents: read
+#
+# The image is tagged with the branch name (= environment) and the commit SHA.
+
+name: reusable-image-build
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "ECR repository name"
+        required: true
+        type: string
+      dockerfile:
+        description: "Path to the Dockerfile"
+        required: false
+        type: string
+        default: "Dockerfile"
+      context:
+        description: "Docker build context"
+        required: false
+        type: string
+        default: "."
+      build-args:
+        description: "Newline-separated docker build args"
+        required: false
+        type: string
+        default: ""
+      aws-region:
+        description: "AWS region"
+        required: false
+        type: string
+        default: "us-east-1"
+      ecs-cluster:
+        description: "ECS cluster name — when set, the services below are rolled after the push"
+        required: false
+        type: string
+        default: ""
+      ecs-services:
+        description: "Space-separated ECS service names to force-new-deployment"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Org-level variable, provisioned by terraform/cicd (ecr_push_role_arn output).
+          role-to-assume: ${{ github.ref_name == 'production' && vars.ECR_PUSH_ROLE_ARN_PRODUCTION || vars.ECR_PUSH_ROLE_ARN_STAGING }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          build-args: ${{ inputs.build-args }}
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ inputs.image-name }}:${{ github.ref_name }}
+            ${{ steps.ecr.outputs.registry }}/${{ inputs.image-name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Task definitions reference the floating branch tag (:staging /
+      # :production), so a rollout is just a forced redeploy — no
+      # task-definition registration needed. Skipped when ecs-cluster is
+      # unset (e.g. the very first build, before the stacks and the one-time
+      # init exist — see terraform/safe/RUNBOOK.md for that ordering).
+      - name: Roll ECS services
+        if: inputs.ecs-cluster != '' && inputs.ecs-services != ''
+        run: |
+          for svc in ${{ inputs.ecs-services }}; do
+            echo "Rolling $svc ..."
+            aws ecs update-service \
+              --cluster "${{ inputs.ecs-cluster }}" \
+              --service "$svc" \
+              --force-new-deployment \
+              --query 'service.deployments[0].id' --output text
+          done
