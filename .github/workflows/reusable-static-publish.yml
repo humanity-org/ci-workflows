@@ -67,10 +67,14 @@ jobs:
           # 1) Everything (removes orphans) as no-cache
           aws s3 sync site "s3://${{ inputs.bucket-name }}" --delete \
             --cache-control "no-cache"
-          # 2) Overwrite content-hashed assets as long-lived immutable
-          aws s3 sync site "s3://${{ inputs.bucket-name }}" \
-            --cache-control "public, max-age=31536000, immutable" \
-            --exclude "*" --include "_next/static/*"
+          # 2) Force-overwrite content-hashed assets as long-lived immutable.
+          #    Use cp (not sync): step 1 already uploaded the identical bytes, so
+          #    a second sync would skip them and never update the Cache-Control.
+          #    cp always re-writes. Guarded for non-Next.js consumers.
+          if [ -d site/_next/static ]; then
+            aws s3 cp "site/_next/static" "s3://${{ inputs.bucket-name }}/_next/static" \
+              --recursive --cache-control "public, max-age=31536000, immutable"
+          fi
 
       - name: Invalidate CloudFront
         run: aws cloudfront create-invalidation --distribution-id "${{ inputs.distribution-id }}" --paths '/*'
