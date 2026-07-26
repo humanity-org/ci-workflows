@@ -56,7 +56,21 @@ jobs:
           aws-region: ${{ inputs.aws-region }}
 
       - name: Sync to S3
-        run: aws s3 sync site "s3://${{ inputs.bucket-name }}" --delete
+        # Immutable-deploy cache strategy. Content-hashed build assets
+        # (/_next/static/*) get a 1-year immutable cache; everything else (HTML,
+        # sw.js, manifests, public assets) gets no-cache so browsers revalidate
+        # every load and pick up a new deploy immediately (the CloudFront edge is
+        # flushed by the invalidation below). Without an explicit Cache-Control,
+        # S3 sets none and browsers heuristically cache stale HTML long after a
+        # deploy — which serves an old app/router until users manually clear.
+        run: |
+          # 1) Everything (removes orphans) as no-cache
+          aws s3 sync site "s3://${{ inputs.bucket-name }}" --delete \
+            --cache-control "no-cache"
+          # 2) Overwrite content-hashed assets as long-lived immutable
+          aws s3 sync site "s3://${{ inputs.bucket-name }}" \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "*" --include "_next/static/*"
 
       - name: Invalidate CloudFront
         run: aws cloudfront create-invalidation --distribution-id "${{ inputs.distribution-id }}" --paths '/*'
